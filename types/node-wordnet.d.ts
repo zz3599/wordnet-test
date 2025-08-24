@@ -8,6 +8,7 @@ declare module "node-wordnet" {
 
     export interface LookupResult {
         synsetOffset: number;   // offset ID of the synset
+        // Based on https://wordnet.princeton.edu/documentation/lexnames5wn
         lexFilenum: number;     // lexicographer file number (0..25)
         lexNo?: number;         // alias for lexFilenum
         lexName?: string;       // e.g., 'noun.person', may be added by WordNet library

@@ -1,18 +1,11 @@
 import WordNet from "node-wordnet";
 import { path as wordnetDbPath } from "wordnet-db";
 import pos from "pos";
-import { promisify } from "util";
+import * as fs from "fs";
+import * as path from "path";
 
 // Promisify WordNet methods
 const wordnet = new WordNet({ dataDir: wordnetDbPath });
-
-// Root synset offsets
-const ROOT_CATEGORIES: Record<number, string> = {
-    1740: "Entity",
-    50892: "Place",
-    53998: "Part of the Body",
-    26390: "Feeling"
-};
 
 export const NOUN_LEX_NAME_MAP: Record<number, string> = {
     3: "noun.Tops",
@@ -58,51 +51,6 @@ async function categorizeNoun(word: string): Promise<string[]> {
     return [...new Set(categories)]; // deduplicate
 }
 
-async function categorizeWord(word: string): Promise<string[]> {
-    const synsets = await wordnet.lookupAsync(word);
-    const categories: Set<string> = new Set();
-
-    for (const synset of synsets) {
-        const found = await findCategoriesByHypernyms(synset.synsetOffset, synset.pos, new Set());
-        for (const f of found) {
-            categories.add(f);
-        }
-    }
-
-    return Array.from(categories);
-}
-
-async function findCategoriesByHypernyms(
-    offset: number,
-    pos: string,
-    visited: Set<string>
-): Promise<string[]> {
-    const key = `${offset}-${pos}`;
-    if (visited.has(key)) {
-        return [];
-    }
-    visited.add(key);
-
-    const categories: string[] = [];
-
-    if (ROOT_CATEGORIES[offset]) {
-        categories.push(ROOT_CATEGORIES[offset]);
-    }
-
-    const synset = await wordnet.getAsync(offset, pos);
-    if (!synset?.ptrs) {
-        return categories;
-    }
-
-    for (const ptr of synset.ptrs) {
-        if (ptr.pointerSymbol === "@") {
-            const subcats = await findCategoriesByHypernyms(ptr.synsetOffset, ptr.pos, visited);
-            categories.push(...subcats);
-        }
-    }
-
-    return categories;
-}
 
 // POS tagging and test
 const lexer = new pos.Lexer();
@@ -130,3 +78,76 @@ const tagger = new pos.Tagger();
     console.log(results);
 })();
 
+// Lexname list from WordNet 3.1 (45 categories)
+const lexnames = [
+    "adj.all", "adj.pert", "adv.all",
+    "noun.Tops", "noun.act", "noun.animal", "noun.artifact", "noun.attribute",
+    "noun.body", "noun.cognition", "noun.communication", "noun.event",
+    "noun.feeling", "noun.food", "noun.group", "noun.location", "noun.motive",
+    "noun.object", "noun.person", "noun.phenomenon", "noun.plant",
+    "noun.possession", "noun.process", "noun.quantity", "noun.relation",
+    "noun.shape", "noun.state", "noun.substance", "noun.time",
+    "verb.body", "verb.change", "verb.cognition", "verb.communication",
+    "verb.competition", "verb.consumption", "verb.contact", "verb.creation",
+    "verb.emotion", "verb.motion", "verb.perception", "verb.possession",
+    "verb.social", "verb.stative", "verb.weather"
+];
+
+function getLexnameByIndex(i: number): string {
+    return lexnames[i] ?? `UNKNOWN(${i})`;
+}
+
+async function main() {
+    const outputPath = path.join(__dirname, "wordnet_words.txt");
+    const writeStream = fs.createWriteStream(outputPath, { flags: "w" });
+
+    const parts = [
+        { index: "index.noun", data: "data.noun" },
+        { index: "index.verb", data: "data.verb" },
+        { index: "index.adj", data: "data.adj" },
+        { index: "index.adv", data: "data.adv" },
+    ];
+
+    const seen = new Set<string>();
+
+    for (const { index, data } of parts) {
+        const indexPath = path.join(wordnetDbPath, index);
+        const dataPath = path.join(wordnetDbPath, data);
+
+        // Load data.* into memory (map synset offset -> lexname index)
+        const offsetToLex: Record<string, string> = {};
+        const dataLines = fs.readFileSync(dataPath, "utf-8").split("\n");
+        for (const line of dataLines) {
+            if (!line || line.startsWith("  ")) continue;
+            const parts = line.trim().split(" ");
+            const offset = parts[0];
+            const lexIdx = parseInt(parts[1], 10); // lexname index
+            offsetToLex[offset] = getLexnameByIndex(lexIdx);
+        }
+
+        // Now parse index.* to get words + synset offsets
+        const indexLines = fs.readFileSync(indexPath, "utf-8").split("\n");
+        for (const line of indexLines) {
+            if (!line || line.startsWith("  ")) continue;
+
+            const bits = line.trim().split(/\s+/);
+            const word = bits[0]; // lemma (with underscores if multiword)
+            if (seen.has(word)) continue;
+            seen.add(word);
+
+            const synsetCnt = parseInt(bits[2], 10);
+            const offsets = bits.slice(bits.length - synsetCnt);
+
+            const wordLex = Array.from(
+                new Set(offsets.map((o) => offsetToLex[o]).filter(Boolean))
+            );
+
+            writeStream.write(`${word},${wordLex.join(",")}\n`);
+        }
+    }
+
+    writeStream.end();
+    console.log("Done! Output at:", outputPath);
+}
+
+main().catch(console.error);
